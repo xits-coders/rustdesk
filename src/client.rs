@@ -35,7 +35,7 @@ use hbb_common::{
         Config, PeerConfig, PeerInfoSerde, Resolution, CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT,
     },
     get_version_number, log,
-    message_proto::{option_message::BoolOption, Resolution as ProtoResolution, *},
+    message_proto::{option_message::BoolOption, *},
     protobuf::Message as _,
     rand,
     rendezvous_proto::*,
@@ -53,10 +53,10 @@ use scrap::{
     ImageFormat, ImageRgb,
 };
 
-use crate::common::{self, is_keyboard_mode_supported};
+use crate::is_keyboard_mode_supported;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use crate::common::{check_clipboard, ClipboardContext, CLIPBOARD_INTERVAL};
+use crate::{check_clipboard, ClipboardContext, CLIPBOARD_INTERVAL};
 #[cfg(not(feature = "flutter"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::ui_session_interface::SessionPermissionConfig;
@@ -305,7 +305,7 @@ impl Client {
             });
             socket.send(&msg_out).await?;
             if let Some(msg_in) =
-                crate::common::get_next_nonkeyexchange_msg(&mut socket, Some(i * 6000)).await
+                crate::get_next_nonkeyexchange_msg(&mut socket, Some(i * 6000)).await
             {
                 match msg_in.union {
                     Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
@@ -672,9 +672,9 @@ impl Client {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn try_stop_clipboard(_self_id: &str) {
+    fn try_stop_clipboard(_self_uuid: &uuid::Uuid) {
         #[cfg(feature = "flutter")]
-        if crate::flutter::other_sessions_running(_self_id) {
+        if crate::flutter::other_sessions_running(_self_uuid) {
             return;
         }
         TEXT_CLIPBOARD_STATE.lock().unwrap().running = false;
@@ -1353,7 +1353,9 @@ impl LoginConfigHandler {
     ///
     /// * `ignore_default` - If `true`, ignore the default value of the option.
     fn get_option_message(&self, ignore_default: bool) -> Option<OptionMessage> {
-        if self.conn_type.eq(&ConnType::FILE_TRANSFER) || self.conn_type.eq(&ConnType::PORT_FORWARD) || self.conn_type.eq(&ConnType::RDP)
+        if self.conn_type.eq(&ConnType::FILE_TRANSFER)
+            || self.conn_type.eq(&ConnType::PORT_FORWARD)
+            || self.conn_type.eq(&ConnType::RDP)
         {
             return None;
         }
@@ -1402,16 +1404,6 @@ impl LoginConfigHandler {
             msg.disable_clipboard = BoolOption::Yes.into();
             n += 1;
         }
-        if let Some(r) = self.get_custom_resolution() {
-            if r.0 > 0 && r.1 > 0 {
-                msg.custom_resolution = Some(ProtoResolution {
-                    width: r.0,
-                    height: r.1,
-                    ..Default::default()
-                })
-                .into();
-            }
-        }
         msg.supported_decoding =
             hbb_common::protobuf::MessageField::some(Decoder::supported_decodings(Some(&self.id)));
         n += 1;
@@ -1424,7 +1416,9 @@ impl LoginConfigHandler {
     }
 
     pub fn get_option_message_after_login(&self) -> Option<OptionMessage> {
-        if self.conn_type.eq(&ConnType::FILE_TRANSFER) || self.conn_type.eq(&ConnType::PORT_FORWARD) || self.conn_type.eq(&ConnType::RDP)
+        if self.conn_type.eq(&ConnType::FILE_TRANSFER)
+            || self.conn_type.eq(&ConnType::PORT_FORWARD)
+            || self.conn_type.eq(&ConnType::RDP)
         {
             return None;
         }
@@ -1584,14 +1578,27 @@ impl LoginConfigHandler {
     }
 
     #[inline]
-    pub fn get_custom_resolution(&self) -> Option<(i32, i32)> {
-        self.config.custom_resolution.as_ref().map(|r| (r.w, r.h))
+    pub fn get_custom_resolution(&self, display: i32) -> Option<(i32, i32)> {
+        self.config
+            .custom_resolutions
+            .get(&display.to_string())
+            .map(|r| (r.w, r.h))
     }
 
     #[inline]
-    pub fn set_custom_resolution(&mut self, wh: Option<(i32, i32)>) {
+    pub fn set_custom_resolution(&mut self, display: i32, wh: Option<(i32, i32)>) {
+        let display = display.to_string();
         let mut config = self.load_config();
-        config.custom_resolution = wh.map(|r| Resolution { w: r.0, h: r.1 });
+        match wh {
+            Some((w, h)) => {
+                config
+                    .custom_resolutions
+                    .insert(display, Resolution { w, h });
+            }
+            None => {
+                config.custom_resolutions.remove(&display);
+            }
+        }
         self.save_config(config);
     }
 
@@ -1649,7 +1656,7 @@ impl LoginConfigHandler {
             }
         } else {
             let keyboard_modes =
-                common::get_supported_keyboard_modes(get_version_number(&pi.version));
+                crate::get_supported_keyboard_modes(get_version_number(&pi.version));
             let current_mode = &KeyboardMode::from_str(&config.keyboard_mode).unwrap_or_default();
             if !keyboard_modes.contains(current_mode) {
                 config.keyboard_mode = KeyboardMode::Legacy.to_string();
@@ -1688,7 +1695,7 @@ impl LoginConfigHandler {
         password: Vec<u8>,
     ) -> Message {
         #[cfg(any(target_os = "android", target_os = "ios"))]
-        let my_id = Config::get_id_or(crate::common::DEVICE_ID.lock().unwrap().clone());
+        let my_id = Config::get_id_or(crate::DEVICE_ID.lock().unwrap().clone());
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let my_id = Config::get_id();
         let mut lr = LoginRequest {
@@ -1898,13 +1905,13 @@ pub async fn handle_test_delay(t: TestDelay, peer: &mut Stream) {
 
 /// Whether is track pad scrolling.
 #[inline]
-#[cfg(all(target_os = "macos"))]
+#[cfg(all(target_os = "macos", not(feature = "flutter")))]
 fn check_scroll_on_mac(mask: i32, x: i32, y: i32) -> bool {
     // flutter version we set mask type bit to 4 when track pad scrolling.
-    if mask & 7 == 4 {
+    if mask & 7 == crate::input::MOUSE_TYPE_TRACKPAD {
         return true;
     }
-    if mask & 3 != 3 {
+    if mask & 3 != crate::input::MOUSE_TYPE_WHEEL {
         return false;
     }
     let btn = mask >> 3;
@@ -1965,9 +1972,12 @@ pub fn send_mouse(
     if command {
         mouse_event.modifiers.push(ControlKey::Meta.into());
     }
-    #[cfg(all(target_os = "macos"))]
+    #[cfg(all(target_os = "macos", not(feature = "flutter")))]
     if check_scroll_on_mac(mask, x, y) {
-        mouse_event.modifiers.push(ControlKey::Scroll.into());
+        let factor = 3;
+        mouse_event.mask = crate::input::MOUSE_TYPE_TRACKPAD;
+        mouse_event.x *= factor;
+        mouse_event.y *= factor;
     }
     interface.swap_modifier_mouse(&mut mouse_event);
     msg_out.set_mouse_event(mouse_event);
@@ -2326,6 +2336,7 @@ pub enum Data {
     CancelJob(i32),
     RemovePortForward(i32),
     AddPortForward((i32, String, i32)),
+    #[cfg(not(feature = "flutter"))]
     ToggleClipboardFile,
     NewRDP,
     SetConfirmOverrideFile((i32, i32, bool, bool, bool)),

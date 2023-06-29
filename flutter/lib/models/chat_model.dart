@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dash_chat_2/dash_chat_2.dart';
 import 'package:draggable_float_widget/draggable_float_widget.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get_rx/src/rx_types/rx_types.dart';
 import 'package:get/get.dart';
@@ -12,6 +13,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../consts.dart';
 import '../common.dart';
 import '../common/widgets/overlay.dart';
+import '../main.dart';
 import 'model.dart';
 
 class MessageBody {
@@ -41,6 +43,14 @@ class ChatModel with ChangeNotifier {
   final Rx<VoiceCallStatus> _voiceCallStatus = Rx(VoiceCallStatus.notStarted);
 
   Rx<VoiceCallStatus> get voiceCallStatus => _voiceCallStatus;
+
+  TextEditingController textController = TextEditingController();
+
+  @override
+  void dispose() {
+    textController.dispose();
+    super.dispose();
+  }
 
   final ChatUser me = ChatUser(
     id: "",
@@ -74,9 +84,36 @@ class ChatModel with ChangeNotifier {
 
   final WeakReference<FFI> parent;
 
-  ChatModel(this.parent);
+  late final SessionID sessionId;
+  late FocusNode inputNode;
 
-  FocusNode inputNode = FocusNode();
+  ChatModel(this.parent) {
+    sessionId = parent.target!.sessionId;
+    inputNode = FocusNode(
+      onKey: (_, event) {
+        bool isShiftPressed = event.isKeyPressed(LogicalKeyboardKey.shiftLeft);
+        bool isEnterPressed = event.isKeyPressed(LogicalKeyboardKey.enter);
+
+        // don't send empty messages
+        if (isEnterPressed && isEnterPressed && textController.text.isEmpty) {
+          return KeyEventResult.handled;
+        }
+
+        if (isEnterPressed && !isShiftPressed) {
+          final ChatMessage message = ChatMessage(
+            text: textController.text,
+            user: me,
+            createdAt: DateTime.now(),
+          );
+          send(message);
+          textController.clear();
+          return KeyEventResult.handled;
+        }
+
+        return KeyEventResult.ignored;
+      },
+    );
+  }
 
   ChatUser get currentUser {
     final user = messages[currentID]?.chatUser;
@@ -252,6 +289,10 @@ class ChatModel with ChangeNotifier {
       return;
     }
     if (text.isEmpty) return;
+    if (desktopType == DesktopType.cm) {
+      await showCmWindow();
+    }
+
     // mobile: first message show overlay icon
     if (!isDesktop && chatIconOverlayEntry == null) {
       showChatIconOverlay();
@@ -298,17 +339,20 @@ class ChatModel with ChangeNotifier {
   }
 
   send(ChatMessage message) {
-    if (message.text.isNotEmpty) {
-      _messages[_currentID]?.insert(message);
-      if (_currentID == clientModeID) {
-        if (parent.target != null) {
-          bind.sessionSendChat(id: parent.target!.id, text: message.text);
-        }
-      } else {
-        bind.cmSendChat(connId: _currentID, msg: message.text);
-      }
+    String trimmedText = message.text.trim();
+    if (trimmedText.isEmpty) {
+      return;
     }
+    message.text = trimmedText;
+    _messages[_currentID]?.insert(message);
+    if (_currentID == clientModeID && parent.target != null) {
+      bind.sessionSendChat(sessionId: sessionId, text: message.text);
+    } else {
+      bind.cmSendChat(connId: _currentID, msg: message.text);
+    }
+
     notifyListeners();
+    inputNode.requestFocus();
   }
 
   close() {
@@ -347,8 +391,8 @@ class ChatModel with ChangeNotifier {
     }
   }
 
-  void closeVoiceCall(String id) {
-    bind.sessionCloseVoiceCall(id: id);
+  void closeVoiceCall() {
+    bind.sessionCloseVoiceCall(sessionId: sessionId);
   }
 }
 

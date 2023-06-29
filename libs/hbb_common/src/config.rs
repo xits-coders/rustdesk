@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime},
@@ -43,8 +44,7 @@ lazy_static::lazy_static! {
     static ref CONFIG: Arc<RwLock<Config>> = Arc::new(RwLock::new(Config::load()));
     static ref CONFIG2: Arc<RwLock<Config2>> = Arc::new(RwLock::new(Config2::load()));
     static ref LOCAL_CONFIG: Arc<RwLock<LocalConfig>> = Arc::new(RwLock::new(LocalConfig::load()));
-    pub static ref CONFIG_OIDC: Arc<RwLock<ConfigOidc>> = Arc::new(RwLock::new(ConfigOidc::load()));
-    pub static ref ONLINE: Arc<Mutex<HashMap<String, i64>>> = Default::default();
+    static ref ONLINE: Arc<Mutex<HashMap<String, i64>>> = Default::default();
     pub static ref PROD_RENDEZVOUS_SERVER: Arc<RwLock<String>> = Arc::new(RwLock::new(match option_env!("RENDEZVOUS_SERVER") {
         Some(key) if !key.is_empty() => key,
         _ => "",
@@ -107,6 +107,9 @@ macro_rules! serde_field_string {
         {
             let s: String =
                 de::Deserialize::deserialize(deserializer).unwrap_or(Self::$default_func());
+            if s.is_empty() {
+                return Ok(Self::$default_func());
+            }
             Ok(s)
         }
     };
@@ -127,6 +130,18 @@ macro_rules! serde_field_bool {
         impl $struct_name {
             pub fn $func() -> bool {
                 UserDefaultConfig::read().get($field_name) == "Y"
+            }
+        }
+        impl Deref for $struct_name {
+            type Target = bool;
+
+            fn deref(&self) -> &Self::Target {
+                &self.v
+            }
+        }
+        impl DerefMut for $struct_name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.v
             }
         }
     };
@@ -206,22 +221,26 @@ pub struct PeerConfig {
     pub size_pf: Size,
     #[serde(
         default = "PeerConfig::default_view_style",
-        deserialize_with = "PeerConfig::deserialize_view_style"
+        deserialize_with = "PeerConfig::deserialize_view_style",
+        skip_serializing_if = "String::is_empty"
     )]
     pub view_style: String,
     #[serde(
         default = "PeerConfig::default_scroll_style",
-        deserialize_with = "PeerConfig::deserialize_scroll_style"
+        deserialize_with = "PeerConfig::deserialize_scroll_style",
+        skip_serializing_if = "String::is_empty"
     )]
     pub scroll_style: String,
     #[serde(
         default = "PeerConfig::default_image_quality",
-        deserialize_with = "PeerConfig::deserialize_image_quality"
+        deserialize_with = "PeerConfig::deserialize_image_quality",
+        skip_serializing_if = "String::is_empty"
     )]
     pub image_quality: String,
     #[serde(
         default = "PeerConfig::default_custom_image_quality",
-        deserialize_with = "PeerConfig::deserialize_custom_image_quality"
+        deserialize_with = "PeerConfig::deserialize_custom_image_quality",
+        skip_serializing_if = "Vec::is_empty"
     )]
     pub custom_image_quality: Vec<i32>,
     #[serde(flatten)]
@@ -244,17 +263,21 @@ pub struct PeerConfig {
     pub enable_file_transfer: EnableFileTransfer,
     #[serde(flatten)]
     pub show_quality_monitor: ShowQualityMonitor,
-    #[serde(default, deserialize_with = "deserialize_string")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub keyboard_mode: String,
     #[serde(flatten)]
     pub view_only: ViewOnly,
 
     #[serde(
         default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_option_resolution"
+        deserialize_with = "deserialize_hashmap_resolutions",
+        skip_serializing_if = "HashMap::is_empty"
     )]
-    pub custom_resolution: Option<Resolution>,
+    pub custom_resolutions: HashMap<String, Resolution>,
 
     // The other scalar value must before this
     #[serde(default, deserialize_with = "PeerConfig::deserialize_options")]
@@ -279,43 +302,16 @@ pub struct PeerInfoSerde {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
-pub struct ConfigOidc {
-    #[serde(default, deserialize_with = "deserialize_usize")]
-    pub max_auth_count: usize,
-    #[serde(default, deserialize_with = "deserialize_string")]
-    pub callback_url: String,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_hashmap_string_configoidcprovider"
-    )]
-    pub providers: HashMap<String, ConfigOidcProvider>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
-pub struct ConfigOidcProvider {
-    // seconds. 0 means never expires
-    #[serde(default, deserialize_with = "deserialize_u32")]
-    pub refresh_token_expires_in: u32,
-    #[serde(default, deserialize_with = "deserialize_string")]
-    pub client_id: String,
-    #[serde(default, deserialize_with = "deserialize_string")]
-    pub client_secret: String,
-    #[serde(default, deserialize_with = "deserialize_option_string")]
-    pub issuer: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_string")]
-    pub authorization_endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_string")]
-    pub token_endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_string")]
-    pub userinfo_endpoint: Option<String>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TransferSerde {
     #[serde(default, deserialize_with = "deserialize_vec_string")]
     pub write_jobs: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_vec_string")]
     pub read_jobs: Vec<String>,
+}
+
+#[inline]
+pub fn get_online_statue() -> i64 {
+    *ONLINE.lock().unwrap().values().max().unwrap_or(&0)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1447,30 +1443,6 @@ impl UserDefaultConfig {
     }
 }
 
-impl ConfigOidc {
-    fn suffix() -> &'static str {
-        "_oidc"
-    }
-
-    fn load() -> Self {
-        Config::load_::<Self>(Self::suffix())._load_env()
-    }
-
-    fn _load_env(mut self) -> Self {
-        use std::env;
-        for (k, v) in &mut self.providers {
-            if let Ok(client_id) = env::var(format!("OIDC-{}-CLIENT-ID", k.to_uppercase())) {
-                v.client_id = client_id;
-            }
-            if let Ok(client_secret) = env::var(format!("OIDC-{}-CLIENT-SECRET", k.to_uppercase()))
-            {
-                v.client_secret = client_secret;
-            }
-        }
-        self
-    }
-}
-
 // use default value when field type is wrong
 macro_rules! deserialize_default {
     ($func_name:ident, $return_type:ty) => {
@@ -1486,19 +1458,15 @@ macro_rules! deserialize_default {
 deserialize_default!(deserialize_string, String);
 deserialize_default!(deserialize_bool, bool);
 deserialize_default!(deserialize_i32, i32);
-deserialize_default!(deserialize_u32, u32);
-deserialize_default!(deserialize_usize, usize);
 deserialize_default!(deserialize_vec_u8, Vec<u8>);
 deserialize_default!(deserialize_vec_string, Vec<String>);
 deserialize_default!(deserialize_vec_i32_string_i32, Vec<(i32, String, i32)>);
 deserialize_default!(deserialize_vec_discoverypeer, Vec<DiscoveryPeer>);
 deserialize_default!(deserialize_keypair, KeyPair);
 deserialize_default!(deserialize_size, Size);
-deserialize_default!(deserialize_option_string, Option<String>);
-deserialize_default!(deserialize_hashmap_string_string,  HashMap<String, String>);
+deserialize_default!(deserialize_hashmap_string_string, HashMap<String, String>);
 deserialize_default!(deserialize_hashmap_string_bool,  HashMap<String, bool>);
-deserialize_default!(deserialize_hashmap_string_configoidcprovider,  HashMap<String, ConfigOidcProvider>);
-deserialize_default!(deserialize_option_resolution, Option<Resolution>);
+deserialize_default!(deserialize_hashmap_resolutions, HashMap<String, Resolution>);
 
 #[cfg(test)]
 mod tests {
@@ -1556,7 +1524,20 @@ mod tests {
             let wrong_type_str = r#"
             view_style = "adaptive"
             scroll_style = "scrollbar"
-            custom_resolution = true
+            custom_resolutions = true
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.view_style = "adaptive".to_string();
+            cfg_to_compare.scroll_style = "scrollbar".to_string();
+            let cfg = toml::from_str::<PeerConfig>(wrong_type_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_type_str");
+
+            let wrong_type_str = r#"
+            view_style = "adaptive"
+            scroll_style = "scrollbar"
+            [custom_resolutions.0]
+            w = "1920"
+            h = 1080
             "#;
             let mut cfg_to_compare = default_peer_config.clone();
             cfg_to_compare.view_style = "adaptive".to_string();
@@ -1565,14 +1546,15 @@ mod tests {
             assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_type_str");
 
             let wrong_field_str = r#"
-            [custom_resolution]
+            [custom_resolutions.0]
             w = 1920
             h = 1080
             hello = "world"
             [ui_flutter]
             "#;
             let mut cfg_to_compare = default_peer_config.clone();
-            cfg_to_compare.custom_resolution = Some(Resolution { w: 1920, h: 1080 });
+            cfg_to_compare.custom_resolutions =
+                HashMap::from([("0".to_string(), Resolution { w: 1920, h: 1080 })]);
             let cfg = toml::from_str::<PeerConfig>(wrong_field_str);
             assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_field_str");
         }
