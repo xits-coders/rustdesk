@@ -97,7 +97,6 @@ message PeerInfo {
   int32 current_display = 5;
   bool sas_enabled = 6;
   string version = 7;
-  int32 conn_id = 8;
   Features features = 9;
   SupportedEncoding encoding = 10;
   SupportedResolutions resolutions = 11;
@@ -508,7 +507,8 @@ message OptionMessage {
   SupportedDecoding supported_decoding = 10;
   int32 custom_fps = 11;
   BoolOption disable_keyboard = 12;
-  Resolution custom_resolution = 13;
+// Position 13 is used for Resolution. Remove later.
+// Resolution custom_resolution = 13;
 }
 
 message TestDelay {

@@ -31,7 +31,7 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
 
   _FileManagerTabPageState(Map<String, dynamic> params) {
     Get.put(DesktopTabController(tabType: DesktopTabType.fileTransfer));
-    tabController.onSelected = (_, id) {
+    tabController.onSelected = (id) {
       WindowController.fromWindowId(windowId())
           .setTitle(getWindowNameWithId(id));
     };
@@ -44,6 +44,8 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
         page: FileManagerPage(
           key: ValueKey(params['id']),
           id: params['id'],
+          password: params['password'],
+          tabController: tabController,
           forceRelay: params['forceRelay'],
         )));
   }
@@ -71,6 +73,8 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
             page: FileManagerPage(
               key: ValueKey(id),
               id: id,
+              password: args['password'],
+              tabController: tabController,
               forceRelay: args['forceRelay'],
             )));
       } else if (call.method == "onDestroy") {

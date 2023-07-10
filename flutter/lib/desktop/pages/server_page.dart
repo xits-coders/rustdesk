@@ -30,13 +30,10 @@ class _DesktopServerPageState extends State<DesktopServerPage>
   final tabController = gFFI.serverModel.tabController;
   @override
   void initState() {
-    gFFI.ffiModel.updateEventListener("");
+    gFFI.ffiModel.updateEventListener(gFFI.sessionId, "");
     windowManager.addListener(this);
     tabController.onRemoved = (_, id) {
       onRemoveId(id);
-    };
-    tabController.onSelected = (_, id) {
-      windowManager.setTitle(getWindowNameWithId(id));
     };
     super.initState();
   }
@@ -100,8 +97,23 @@ class ConnectionManagerState extends State<ConnectionManager> {
   @override
   void initState() {
     gFFI.serverModel.updateClientState();
-    gFFI.serverModel.tabController.onSelected = (index, _) =>
-        gFFI.chatModel.changeCurrentID(gFFI.serverModel.clients[index].id);
+    gFFI.serverModel.tabController.onSelected = (client_id_str) {
+      final client_id = int.tryParse(client_id_str);
+      if (client_id != null) {
+        gFFI.chatModel.changeCurrentID(client_id);
+        final client =
+            gFFI.serverModel.clients.firstWhereOrNull((e) => e.id == client_id);
+        if (client != null) {
+          if (client.unreadChatMessageCount.value > 0) {
+            Future.delayed(Duration.zero, () {
+              client.unreadChatMessageCount.value = 0;
+              gFFI.chatModel.showChatPage(client.id);
+            });
+          }
+          windowManager.setTitle(getWindowNameWithId(client.peerId));
+        }
+      }
+    };
     gFFI.chatModel.isConnManager = true;
     super.initState();
   }
@@ -138,10 +150,11 @@ class ConnectionManagerState extends State<ConnectionManager> {
               showClose: true,
               onWindowCloseButton: handleWindowCloseButton,
               controller: serverModel.tabController,
+              selectedBorderColor: MyTheme.accent,
               maxLabelWidth: 100,
               tail: buildScrollJumper(),
               selectedTabBackgroundColor:
-                  Theme.of(context).hintColor.withOpacity(0.2),
+                  Theme.of(context).hintColor.withOpacity(0),
               tabBuilder: (key, icon, label, themeConf) {
                 final client = serverModel.clients
                     .firstWhereOrNull((client) => client.id.toString() == key);
@@ -152,10 +165,7 @@ class ConnectionManagerState extends State<ConnectionManager> {
                         message: key,
                         waitDuration: Duration(seconds: 1),
                         child: label),
-                    Obx(() => Offstage(
-                        offstage:
-                            !(client?.hasUnreadChatMessage.value ?? false),
-                        child: Icon(Icons.circle, color: Colors.red, size: 10)))
+                    unreadMessageCountBuilder(client?.unreadChatMessageCount),
                   ],
                 );
               },
@@ -164,20 +174,23 @@ class ConnectionManagerState extends State<ConnectionManager> {
                   Consumer<ChatModel>(
                     builder: (_, model, child) => model.isShowCMChatPage
                         ? Expanded(
-                            child: ChatPage(),
-                            flex: (kConnectionManagerWindowSizeOpenChat.width -
-                                    kConnectionManagerWindowSizeClosedChat
-                                        .width)
-                                .toInt(),
+                            child: buildRemoteBlock(
+                              child: Container(
+                                  decoration: BoxDecoration(
+                                      border: Border(
+                                          right: BorderSide(
+                                              color: Theme.of(context)
+                                                  .dividerColor))),
+                                  child: ChatPage()),
+                            ),
                           )
                         : Offstage(),
                   ),
-                  Expanded(
-                      child: pageView,
-                      flex: kConnectionManagerWindowSizeClosedChat.width
-                              .toInt() -
-                          4 // prevent stretch of the page view when chat is open,
-                      ),
+                  SizedBox(
+                    width: kConnectionManagerWindowSizeClosedChat.width -
+                        10, // 10 is from overflow
+                    child: pageView,
+                  )
                 ],
               ),
             ),
@@ -328,6 +341,7 @@ class _CmHeaderState extends State<_CmHeader>
         _time.value = _time.value + 1;
       }
     });
+    gFFI.serverModel.tabController.onSelected?.call(client.id.toString());
   }
 
   @override
@@ -459,7 +473,7 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
   Widget buildPermissionIcon(bool enabled, IconData iconData,
       Function(bool)? onTap, String tooltipText) {
     return Tooltip(
-      message: tooltipText,
+      message: "$tooltipText: ${enabled ? "ON" : "OFF"}",
       child: Container(
         decoration: BoxDecoration(
           color: enabled ? MyTheme.accent : Colors.grey[700],
@@ -476,17 +490,9 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                 child: Icon(
                   iconData,
                   color: Colors.white,
+                  size: 32,
                 ),
               ),
-              Text(
-                enabled ? "ON" : "OFF",
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontWeight: FontWeight.w200,
-                  color: Colors.white,
-                  fontSize: 10.0,
-                ),
-              )
             ],
           ),
         ),
@@ -760,13 +766,14 @@ class _CmControlPanel extends StatelessWidget {
             handleElevate(context);
             windowManager.minimize();
           },
-              text: 'Accept',
+              text: 'Accept and Elevate',
               icon: Icon(
                 Icons.security_rounded,
                 color: Colors.white,
                 size: 14,
               ),
-              textColor: Colors.white),
+              textColor: Colors.white,
+              tooltip: 'accept_and_elevate_btn_tooltip'),
         ),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -804,15 +811,14 @@ class _CmControlPanel extends StatelessWidget {
     ).marginOnly(bottom: buttonBottomMargin);
   }
 
-  Widget buildButton(
-    BuildContext context, {
-    required Color? color,
-    required Function() onClick,
-    Icon? icon,
-    BoxBorder? border,
-    required String text,
-    required Color? textColor,
-  }) {
+  Widget buildButton(BuildContext context,
+      {required Color? color,
+      required Function() onClick,
+      Icon? icon,
+      BoxBorder? border,
+      required String text,
+      required Color? textColor,
+      String? tooltip}) {
     Widget textWidget;
     if (icon != null) {
       textWidget = Text(
@@ -829,13 +835,13 @@ class _CmControlPanel extends StatelessWidget {
         ),
       );
     }
-    return Container(
+    final borderRadius = BorderRadius.circular(10.0);
+    final btn = Container(
       height: 28,
       decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(10.0),
-          border: border),
+          color: color, borderRadius: borderRadius, border: border),
       child: InkWell(
+        borderRadius: borderRadius,
         onTap: () => checkClickTime(client.id, onClick),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -845,7 +851,14 @@ class _CmControlPanel extends StatelessWidget {
           ],
         ),
       ),
-    ).marginAll(4);
+    );
+    return (tooltip != null
+            ? Tooltip(
+                message: translate(tooltip),
+                child: btn,
+              )
+            : btn)
+        .marginAll(4);
   }
 
   void handleDisconnect() {

@@ -94,7 +94,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
         ? const SizedBox(height: 0)
         : InkWell(
             onTap: () async {
-              final url = '$_updateUrl.apk';
+              final url = 'https://rustdesk.com/download';
               if (await canLaunchUrl(Uri.parse(url))) {
                 await launchUrl(Uri.parse(url));
               }
@@ -173,7 +173,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
       ),
     );
     return Align(
-        alignment: Alignment.topLeft,
+        alignment: Alignment.topCenter,
         child: Container(constraints: kMobilePageConstraints, child: w));
   }
 
@@ -215,6 +215,7 @@ class _WebMenuState extends State<WebMenu> {
   Widget build(BuildContext context) {
     Provider.of<FfiModel>(context);
     return PopupMenuButton<String>(
+        tooltip: "",
         icon: const Icon(Icons.more_vert),
         itemBuilder: (context) {
           return (isIOS

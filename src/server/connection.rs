@@ -63,6 +63,7 @@ lazy_static::lazy_static! {
     static ref SWITCH_SIDES_UUID: Arc::<Mutex<HashMap<String, (Instant, uuid::Uuid)>>> = Default::default();
 }
 pub static CLICK_TIME: AtomicI64 = AtomicI64::new(0);
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub static MOUSE_MOVE_TIME: AtomicI64 = AtomicI64::new(0);
 
 #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
@@ -163,6 +164,7 @@ pub struct Connection {
     // by peer
     disable_audio: bool,
     // by peer
+    #[cfg(windows)]
     enable_file_transfer: bool,
     // by peer
     audio_sender: Option<MediaSender>,
@@ -190,6 +192,7 @@ pub struct Connection {
     #[cfg(all(target_os = "linux", feature = "linux_headless"))]
     #[cfg(not(any(feature = "flatpak", feature = "appimage")))]
     tx_desktop_ready: mpsc::Sender<()>,
+    closed: bool,
 }
 
 impl ConnInner {
@@ -241,12 +244,12 @@ impl Connection {
         id: i32,
         server: super::ServerPtrWeak,
     ) {
+        let _raii_id = raii::ConnectionID::new(id);
         let hash = Hash {
             salt: Config::get_salt(),
             challenge: Config::get_auto_password(6),
             ..Default::default()
         };
-        ALIVE_CONNS.lock().unwrap().push(id);
         let (tx_from_cm_holder, mut rx_from_cm) = mpsc::unbounded_channel::<ipc::Data>();
         // holding tx_from_cm_holder to avoid cpu burning of rx_from_cm.recv when all sender closed
         let tx_from_cm = tx_from_cm_holder.clone();
@@ -282,6 +285,7 @@ impl Connection {
             keyboard: Connection::permission("enable-keyboard"),
             clipboard: Connection::permission("enable-clipboard"),
             audio: Connection::permission("enable-audio"),
+            // to-do: make sure is the option correct here
             file: Connection::permission("enable-file-transfer"),
             restart: Connection::permission("enable-remote-restart"),
             recording: Connection::permission("enable-record-session"),
@@ -290,6 +294,7 @@ impl Connection {
             show_remote_cursor: false,
             ip: "".to_owned(),
             disable_audio: false,
+            #[cfg(windows)]
             enable_file_transfer: false,
             disable_clipboard: false,
             disable_keyboard: false,
@@ -316,8 +321,10 @@ impl Connection {
             #[cfg(all(target_os = "linux", feature = "linux_headless"))]
             #[cfg(not(any(feature = "flatpak", feature = "appimage")))]
             tx_desktop_ready: _tx_desktop_ready,
+            closed: false,
         };
         if !conn.on_open(addr).await {
+            conn.closed = true;
             // sleep to ensure msg got received.
             sleep(1.).await;
             return;
@@ -424,7 +431,6 @@ impl Connection {
                             } else if &name == "file" {
                                 conn.file = enabled;
                                 conn.send_permission(Permission::File, enabled).await;
-                                conn.send_to_cm(ipc::Data::ClipboardFileEnabled(conn.file_transfer_enabled()));
                             } else if &name == "restart" {
                                 conn.restart = enabled;
                                 conn.send_permission(Permission::Restart, enabled).await;
@@ -437,10 +443,8 @@ impl Connection {
                             allow_err!(conn.stream.send_raw(bytes).await);
                         }
                         #[cfg(windows)]
-                        ipc::Data::ClipboardFile(_clip) => {
-                            if conn.file_transfer_enabled() {
-                                allow_err!(conn.stream.send(&clip_2_msg(_clip)).await);
-                            }
+                        ipc::Data::ClipboardFile(clip) => {
+                            allow_err!(conn.stream.send(&clip_2_msg(clip)).await);
                         }
                         ipc::Data::PrivacyModeState((_, state)) => {
                             let msg_out = match state {
@@ -562,7 +566,7 @@ impl Connection {
                             match &m.union {
                                 Some(misc::Union::StopService(_)) => {
                                     conn.send_close_reason_no_retry("").await;
-                                    conn.on_close("stop service", true).await;
+                                    conn.on_close("stop service", false).await;
                                     break;
                                 }
                                 _ => {},
@@ -627,18 +631,13 @@ impl Connection {
         conn.post_conn_audit(json!({
             "action": "close",
         }));
-        let mut active_conns_lock = ALIVE_CONNS.lock().unwrap();
-        active_conns_lock.retain(|&c| c != id);
         if let Some(s) = conn.server.upgrade() {
             let mut s = s.write().unwrap();
             s.remove_connection(&conn.inner);
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             try_stop_record_cursor_pos();
         }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if active_conns_lock.is_empty() {
-            video_service::reset_resolutions();
-        }
+        conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
     }
 
@@ -826,7 +825,6 @@ impl Connection {
                 .await;
             Self::post_alarm_audit(
                 AlarmAuditType::IpWhitelist, //"ip whitelist",
-                true,
                 json!({ "ip":addr.ip() }),
             );
             return false;
@@ -836,9 +834,6 @@ impl Connection {
 
     async fn on_open(&mut self, addr: SocketAddr) -> bool {
         log::debug!("#{} Connection opened from {}.", self.inner.id, addr);
-        if !self.check_privacy_mode_on().await {
-            return false;
-        }
         if !self.check_whitelist(&addr).await {
             return false;
         }
@@ -876,6 +871,7 @@ impl Connection {
         v["id"] = json!(Config::get_id());
         v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
         v["conn_id"] = json!(self.inner.id);
+        v["session_id"] = json!(self.lr.session_id);
         tokio::spawn(async move {
             allow_err!(Self::post_audit_async(url, v).await);
         });
@@ -916,7 +912,7 @@ impl Connection {
         });
     }
 
-    pub fn post_alarm_audit(typ: AlarmAuditType, from_remote: bool, info: Value) {
+    pub fn post_alarm_audit(typ: AlarmAuditType, info: Value) {
         let url = crate::get_audit_server(
             Config::get_option("api-server"),
             Config::get_option("custom-rendezvous-server"),
@@ -929,7 +925,6 @@ impl Connection {
         v["id"] = json!(Config::get_id());
         v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
         v["typ"] = json!(typ as i8);
-        v["from_remote"] = json!(from_remote);
         v["info"] = serde_json::Value::String(info.to_string());
         tokio::spawn(async move {
             allow_err!(Self::post_audit_async(url, v).await);
@@ -958,7 +953,6 @@ impl Connection {
         let mut res = LoginResponse::new();
         let mut pi = PeerInfo {
             username: username.clone(),
-            conn_id: self.inner.id,
             version: VERSION.to_owned(),
             ..Default::default()
         };
@@ -1125,6 +1119,7 @@ impl Connection {
         self.audio && !self.disable_audio
     }
 
+    #[cfg(windows)]
     fn file_transfer_enabled(&self) -> bool {
         self.file && self.enable_file_transfer
     }
@@ -1142,7 +1137,7 @@ impl Connection {
             clipboard: self.clipboard,
             audio: self.audio,
             file: self.file,
-            file_transfer_enabled: self.file_transfer_enabled(),
+            file_transfer_enabled: self.file,
             restart: self.restart,
             recording: self.recording,
             from_switch: self.from_switch,
@@ -1237,6 +1232,7 @@ impl Connection {
             .lock()
             .unwrap()
             .retain(|_, s| s.last_recv_time.lock().unwrap().elapsed() < SESSION_TIMEOUT);
+        // last_recv_time is a mutex variable shared with connection, can be updated lively.
         if let Some(session) = session {
             if session.name == self.lr.my_name
                 && session.session_id == self.lr.session_id
@@ -1352,7 +1348,11 @@ impl Connection {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    if !self.check_privacy_mode_on().await {
+                        return false;
+                    }
+                }
             }
 
             #[cfg(all(target_os = "linux", feature = "linux_headless"))]
@@ -1380,9 +1380,13 @@ impl Connection {
                 return true;
             }
 
-            if !hbb_common::is_ipv4_str(&lr.username) && lr.username != Config::get_id() {
+            if !hbb_common::is_ip_str(&lr.username)
+                && !hbb_common::is_domain_port_str(&lr.username)
+                && lr.username != Config::get_id()
+            {
                 self.send_login_error(crate::client::LOGIN_MSG_OFFLINE)
                     .await;
+                return false;
             } else if password::approve_mode() == ApproveMode::Click
                 || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
             {
@@ -1450,7 +1454,6 @@ impl Connection {
                         .await;
                     Self::post_alarm_audit(
                         AlarmAuditType::ManyWrongPassword,
-                        true,
                         json!({
                                     "ip":self.ip,
                         }),
@@ -1459,7 +1462,6 @@ impl Connection {
                     self.send_login_error("Please try 1 minute later").await;
                     Self::post_alarm_audit(
                         AlarmAuditType::FrequentAttempt,
-                        true,
                         json!({
                                     "ip":self.ip,
                         }),
@@ -1637,12 +1639,11 @@ impl Connection {
                         update_clipboard(_cb, None);
                     }
                 }
-                Some(message::Union::Cliprdr(_clip)) => {
-                    if self.file_transfer_enabled() {
-                        #[cfg(windows)]
-                        if let Some(clip) = msg_2_clip(_clip) {
-                            self.send_to_cm(ipc::Data::ClipboardFile(clip))
-                        }
+                Some(message::Union::Cliprdr(_clip)) =>
+                {
+                    #[cfg(windows)]
+                    if let Some(clip) = msg_2_clip(_clip) {
+                        self.send_to_cm(ipc::Data::ClipboardFile(clip))
                     }
                 }
                 Some(message::Union::FileAction(fa)) => {
@@ -1793,6 +1794,14 @@ impl Connection {
                 Some(message::Union::Misc(misc)) => match misc.union {
                     Some(misc::Union::SwitchDisplay(s)) => {
                         video_service::switch_display(s.display).await;
+                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                        if s.width != 0 && s.height != 0 {
+                            self.change_resolution(&Resolution {
+                                width: s.width,
+                                height: s.height,
+                                ..Default::default()
+                            });
+                        }
                     }
                     Some(misc::Union::ChatMessage(c)) => {
                         self.send_to_cm(ipc::Data::ChatMessage { text: c.text });
@@ -2159,12 +2168,6 @@ impl Connection {
                 }
             }
         }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if let Some(custom_resolution) = o.custom_resolution.as_ref() {
-            if custom_resolution.width > 0 && custom_resolution.height > 0 {
-                self.change_resolution(&custom_resolution);
-            }
-        }
         if self.keyboard {
             if let Ok(q) = o.block_input.enum_value() {
                 match q {
@@ -2181,6 +2184,10 @@ impl Connection {
     }
 
     async fn on_close(&mut self, reason: &str, lock: bool) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
         log::info!("#{} Connection closed: {}", self.inner.id(), reason);
         if lock && self.lock_after_session_end && self.keyboard {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2526,5 +2533,36 @@ impl Drop for Connection {
     fn drop(&mut self) {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_pressed_modifiers();
+    }
+}
+
+mod raii {
+    use super::*;
+    pub struct ConnectionID(i32);
+
+    impl ConnectionID {
+        pub fn new(id: i32) -> Self {
+            ALIVE_CONNS.lock().unwrap().push(id);
+            Self(id)
+        }
+    }
+
+    impl Drop for ConnectionID {
+        fn drop(&mut self) {
+            let mut active_conns_lock = ALIVE_CONNS.lock().unwrap();
+            active_conns_lock.retain(|&c| c != self.0);
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if active_conns_lock.is_empty() {
+                video_service::reset_resolutions();
+            }
+            #[cfg(all(windows, feature = "virtual_display_driver"))]
+            if active_conns_lock.is_empty() {
+                video_service::try_plug_out_virtual_display();
+            }
+            #[cfg(all(windows))]
+            if active_conns_lock.is_empty() {
+                crate::privacy_win_mag::stop();
+            }
+        }
     }
 }

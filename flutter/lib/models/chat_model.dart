@@ -1,9 +1,14 @@
 import 'dart:async';
 
 import 'package:dash_chat_2/dash_chat_2.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:draggable_float_widget/draggable_float_widget.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get_rx/src/rx_types/rx_types.dart';
 import 'package:get/get.dart';
 import 'package:window_manager/window_manager.dart';
@@ -12,6 +17,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../consts.dart';
 import '../common.dart';
 import '../common/widgets/overlay.dart';
+import '../main.dart';
 import 'model.dart';
 
 class MessageBody {
@@ -41,6 +47,14 @@ class ChatModel with ChangeNotifier {
   final Rx<VoiceCallStatus> _voiceCallStatus = Rx(VoiceCallStatus.notStarted);
 
   Rx<VoiceCallStatus> get voiceCallStatus => _voiceCallStatus;
+
+  TextEditingController textController = TextEditingController();
+
+  @override
+  void dispose() {
+    textController.dispose();
+    super.dispose();
+  }
 
   final ChatUser me = ChatUser(
     id: "",
@@ -74,9 +88,36 @@ class ChatModel with ChangeNotifier {
 
   final WeakReference<FFI> parent;
 
-  ChatModel(this.parent);
+  late final SessionID sessionId;
+  late FocusNode inputNode;
 
-  FocusNode inputNode = FocusNode();
+  ChatModel(this.parent) {
+    sessionId = parent.target!.sessionId;
+    inputNode = FocusNode(
+      onKey: (_, event) {
+        bool isShiftPressed = event.isKeyPressed(LogicalKeyboardKey.shiftLeft);
+        bool isEnterPressed = event.isKeyPressed(LogicalKeyboardKey.enter);
+
+        // don't send empty messages
+        if (isEnterPressed && isEnterPressed && textController.text.isEmpty) {
+          return KeyEventResult.handled;
+        }
+
+        if (isEnterPressed && !isShiftPressed) {
+          final ChatMessage message = ChatMessage(
+            text: textController.text,
+            user: me,
+            createdAt: DateTime.now(),
+          );
+          send(message);
+          textController.clear();
+          return KeyEventResult.handled;
+        }
+
+        return KeyEventResult.ignored;
+      },
+    );
+  }
 
   ChatUser get currentUser {
     final user = messages[currentID]?.chatUser;
@@ -193,13 +234,21 @@ class ChatModel with ChangeNotifier {
   }
 
   showChatPage(int id) async {
-    if (isConnManager) {
-      if (!_isShowCMChatPage) {
-        await toggleCMChatPage(id);
+    if (isDesktop) {
+      if (isConnManager) {
+        if (!_isShowCMChatPage) {
+          await toggleCMChatPage(id);
+        }
+      } else {
+        if (_isChatOverlayHide()) {
+          await toggleChatOverlay();
+        }
       }
     } else {
-      if (_isChatOverlayHide()) {
-        await toggleChatOverlay();
+      if (id == clientModeID) {
+        if (_isChatOverlayHide()) {
+          await toggleChatOverlay();
+        }
       }
     }
   }
@@ -252,6 +301,10 @@ class ChatModel with ChangeNotifier {
       return;
     }
     if (text.isEmpty) return;
+    if (desktopType == DesktopType.cm) {
+      await showCmWindow();
+    }
+
     // mobile: first message show overlay icon
     if (!isDesktop && chatIconOverlayEntry == null) {
       showChatIconOverlay();
@@ -268,6 +321,29 @@ class ChatModel with ChangeNotifier {
         id: session.id,
       );
       toId = id;
+
+      if (isDesktop) {
+        if (Get.isRegistered<DesktopTabController>()) {
+          DesktopTabController tabController = Get.find<DesktopTabController>();
+          var index = tabController.state.value.tabs
+              .indexWhere((e) => e.key == session.id);
+          final notSelected =
+              index >= 0 && tabController.state.value.selected != index;
+          // minisized: top and switch tab
+          // not minisized: add count
+          if (await WindowController.fromWindowId(stateGlobal.windowId)
+              .isMinimized()) {
+            window_on_top(stateGlobal.windowId);
+            if (notSelected) {
+              tabController.jumpTo(index);
+            }
+          } else {
+            if (notSelected) {
+              UnreadChatCountState.find(session.id).value += 1;
+            }
+          }
+        }
+      }
     } else {
       final client =
           session.serverModel.clients.firstWhere((client) => client.id == id);
@@ -277,7 +353,7 @@ class ChatModel with ChangeNotifier {
         final currentSelectedTab =
             session.serverModel.tabController.state.value.selectedTabInfo;
         if (currentSelectedTab.key != id.toString() && inputNode.hasFocus) {
-          client.hasUnreadChatMessage.value = true;
+          client.unreadChatMessageCount.value += 1;
         } else {
           parent.target?.serverModel.jumpTo(id);
           toId = id;
@@ -298,17 +374,20 @@ class ChatModel with ChangeNotifier {
   }
 
   send(ChatMessage message) {
-    if (message.text.isNotEmpty) {
-      _messages[_currentID]?.insert(message);
-      if (_currentID == clientModeID) {
-        if (parent.target != null) {
-          bind.sessionSendChat(id: parent.target!.id, text: message.text);
-        }
-      } else {
-        bind.cmSendChat(connId: _currentID, msg: message.text);
-      }
+    String trimmedText = message.text.trim();
+    if (trimmedText.isEmpty) {
+      return;
     }
+    message.text = trimmedText;
+    _messages[_currentID]?.insert(message);
+    if (_currentID == clientModeID && parent.target != null) {
+      bind.sessionSendChat(sessionId: sessionId, text: message.text);
+    } else {
+      bind.cmSendChat(connId: _currentID, msg: message.text);
+    }
+
     notifyListeners();
+    inputNode.requestFocus();
   }
 
   close() {
@@ -347,8 +426,8 @@ class ChatModel with ChangeNotifier {
     }
   }
 
-  void closeVoiceCall(String id) {
-    bind.sessionCloseVoiceCall(id: id);
+  void closeVoiceCall() {
+    bind.sessionCloseVoiceCall(sessionId: sessionId);
   }
 }
 

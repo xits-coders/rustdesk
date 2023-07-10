@@ -33,9 +33,6 @@ int? kWindowId;
 WindowType? kWindowType;
 late List<String> kBootArgs;
 
-/// Uni links.
-StreamSubscription? _uniLinkSubscription;
-
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
   debugPrint("launch args: $args");
@@ -123,7 +120,6 @@ void runMainApp(bool startService) async {
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
   if (startService) {
-    // await windowManager.ensureInitialized();
     gFFI.serverModel.startService();
     bind.pluginSyncUi(syncTo: kAppTypeMain);
     bind.pluginListReload();
@@ -138,7 +134,7 @@ void runMainApp(bool startService) async {
     // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
     final handledByUniLinks = await initUniLinks();
     debugPrint("handled by uni links: $handledByUniLinks");
-    if (handledByUniLinks || checkArguments()) {
+    if (handledByUniLinks || handleUriLink(cmdArgs: kBootArgs)) {
       windowManager.hide();
     } else {
       windowManager.show();
@@ -155,6 +151,7 @@ void runMobileApp() async {
   await initEnv(kAppTypeMain);
   if (isAndroid) androidChannelInit();
   platformFFI.syncAndroidServiceAppDirConfigPath();
+  gFFI.userModel.refreshCurrentUser();
   runApp(App());
 }
 
@@ -224,36 +221,55 @@ void runConnectionManagerScreen(bool hide) async {
     MyTheme.currentThemeMode(),
   );
   if (hide) {
-    hideCmWindow();
+    await hideCmWindow(isStartup: true);
   } else {
-    showCmWindow();
+    await showCmWindow(isStartup: true);
   }
+  windowManager.setResizable(false);
   // Start the uni links handler and redirect links to Native, not for Flutter.
-  _uniLinkSubscription = listenUniLinks(handleByFlutter: false);
+  listenUniLinks(handleByFlutter: false);
 }
 
-void showCmWindow() {
-  WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-      size: kConnectionManagerWindowSizeClosedChat);
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    bind.mainHideDocker();
-    await windowManager.show();
-    await Future.wait([windowManager.focus(), windowManager.setOpacity(1)]);
-    // ensure initial window size to be changed
-    await windowManager.setSizeAlignment(
-        kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
-  });
+showCmWindow({bool isStartup = false}) async {
+  if (isStartup) {
+    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+        size: kConnectionManagerWindowSizeClosedChat);
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      bind.mainHideDocker();
+      await windowManager.show();
+      await Future.wait([windowManager.focus(), windowManager.setOpacity(1)]);
+      // ensure initial window size to be changed
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+    });
+  } else {
+    if (await windowManager.getOpacity() != 1) {
+      await windowManager.setOpacity(1);
+      await windowManager.focus();
+      await windowManager.minimize(); //needed
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+      window_on_top(null);
+    }
+  }
 }
 
-void hideCmWindow() {
-  WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-      size: kConnectionManagerWindowSizeClosedChat);
-  windowManager.setOpacity(0);
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
+hideCmWindow({bool isStartup = false}) async {
+  if (isStartup) {
+    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+        size: kConnectionManagerWindowSizeClosedChat);
+    windowManager.setOpacity(0);
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      bind.mainHideDocker();
+      await windowManager.minimize();
+      await windowManager.hide();
+    });
+  } else {
+    await windowManager.setOpacity(0);
     bind.mainHideDocker();
     await windowManager.minimize();
     await windowManager.hide();
-  });
+  }
 }
 
 void _runApp(
