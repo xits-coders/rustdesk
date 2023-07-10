@@ -685,7 +685,7 @@ pub fn main_get_connect_status() -> String {
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        let mut state = hbb_common::config::get_online_statue();
+        let mut state = hbb_common::config::get_online_state();
         if state > 0 {
             state = 1;
         }
@@ -1448,9 +1448,9 @@ pub fn main_use_texture_render() -> SyncReturn<bool> {
     }
 }
 
-pub fn cm_start_listen_ipc_thread() {
+pub fn cm_init() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    crate::flutter::connection_manager::start_listen_ipc_thread();
+    crate::flutter::connection_manager::cm_init();
 }
 
 /// Start an ipc server for receiving the url scheme.

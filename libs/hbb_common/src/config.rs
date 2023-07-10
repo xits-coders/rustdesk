@@ -84,7 +84,6 @@ const CHARS: &[char] = &[
 pub const RENDEZVOUS_SERVERS: &[&str] = &[
     "rs-ny.rustdesk.com",
     "rs-sg.rustdesk.com",
-    "rs-cn.rustdesk.com",
 ];
 
 pub const RS_PUB_KEY: &str = match option_env!("RS_PUB_KEY") {
@@ -310,7 +309,7 @@ pub struct TransferSerde {
 }
 
 #[inline]
-pub fn get_online_statue() -> i64 {
+pub fn get_online_state() -> i64 {
     *ONLINE.lock().unwrap().values().max().unwrap_or(&0)
 }
 
