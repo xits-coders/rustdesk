@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
@@ -124,6 +125,7 @@ void runMainApp(bool startService) async {
     bind.pluginSyncUi(syncTo: kAppTypeMain);
     bind.pluginListReload();
   }
+  gFFI.abModel.loadCache();
   gFFI.userModel.refreshCurrentUser();
   runApp(App());
   // Set window option.
@@ -151,6 +153,7 @@ void runMobileApp() async {
   await initEnv(kAppTypeMain);
   if (isAndroid) androidChannelInit();
   platformFFI.syncAndroidServiceAppDirConfigPath();
+  gFFI.abModel.loadCache();
   gFFI.userModel.refreshCurrentUser();
   runApp(App());
 }
@@ -196,7 +199,7 @@ void runMultiWindow(
   switch (appType) {
     case kAppTypeDesktopRemote:
       await restoreWindowPosition(WindowType.RemoteDesktop,
-          windowId: kWindowId!);
+          windowId: kWindowId!, peerId: argument['id'] as String?);
       break;
     case kAppTypeDesktopFileTransfer:
       await restoreWindowPosition(WindowType.FileTransfer,
@@ -249,7 +252,7 @@ showCmWindow({bool isStartup = false}) async {
       await windowManager.minimize(); //needed
       await windowManager.setSizeAlignment(
           kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
-      window_on_top(null);
+      windowOnTop(null);
     }
   }
 }
@@ -265,10 +268,12 @@ hideCmWindow({bool isStartup = false}) async {
       await windowManager.hide();
     });
   } else {
-    await windowManager.setOpacity(0);
-    bind.mainHideDocker();
-    await windowManager.minimize();
-    await windowManager.hide();
+    if (await windowManager.getOpacity() != 0) {
+      await windowManager.setOpacity(0);
+      bind.mainHideDocker();
+      await windowManager.minimize();
+      await windowManager.hide();
+    }
   }
 }
 
@@ -417,6 +422,9 @@ class _AppState extends State<App> {
               : (context, child) {
                   child = _keepScaleBuilder(context, child);
                   child = botToastBuilder(context, child);
+                  if (isDesktop && desktopType == DesktopType.main) {
+                    child = keyListenerBuilder(context, child);
+                  }
                   return child;
                 },
         ),
@@ -452,4 +460,20 @@ _registerEventHandler() {
       NativeUiHandler.instance.onEvent(evt);
     });
   }
+}
+
+Widget keyListenerBuilder(BuildContext context, Widget? child) {
+  return RawKeyboardListener(
+    focusNode: FocusNode(),
+    child: child ?? Container(),
+    onKey: (RawKeyEvent event) {
+      if (event.logicalKey == LogicalKeyboardKey.shiftLeft) {
+        if (event is RawKeyDownEvent) {
+          gFFI.peerTabModel.setShiftDown(true);
+        } else if (event is RawKeyUpEvent) {
+          gFFI.peerTabModel.setShiftDown(false);
+        }
+      }
+    },
+  );
 }

@@ -100,14 +100,14 @@ class ConnectionManagerState extends State<ConnectionManager> {
     gFFI.serverModel.tabController.onSelected = (client_id_str) {
       final client_id = int.tryParse(client_id_str);
       if (client_id != null) {
-        gFFI.chatModel.changeCurrentID(client_id);
         final client =
             gFFI.serverModel.clients.firstWhereOrNull((e) => e.id == client_id);
         if (client != null) {
+          gFFI.chatModel.changeCurrentKey(MessageKey(client.peerId, client.id));
           if (client.unreadChatMessageCount.value > 0) {
             Future.delayed(Duration.zero, () {
               client.unreadChatMessageCount.value = 0;
-              gFFI.chatModel.showChatPage(client.id);
+              gFFI.chatModel.showChatPage(MessageKey(client.peerId, client.id));
             });
           }
           windowManager.setTitle(getWindowNameWithId(client.peerId));
@@ -165,7 +165,8 @@ class ConnectionManagerState extends State<ConnectionManager> {
                         message: key,
                         waitDuration: Duration(seconds: 1),
                         child: label),
-                    unreadMessageCountBuilder(client?.unreadChatMessageCount),
+                    unreadMessageCountBuilder(client?.unreadChatMessageCount)
+                        .marginOnly(left: 4),
                   ],
                 );
               },
@@ -181,16 +182,22 @@ class ConnectionManagerState extends State<ConnectionManager> {
                                           right: BorderSide(
                                               color: Theme.of(context)
                                                   .dividerColor))),
-                                  child: ChatPage()),
+                                  child:
+                                      ChatPage(type: ChatPageType.desktopCM)),
                             ),
+                            flex: (kConnectionManagerWindowSizeOpenChat.width -
+                                    kConnectionManagerWindowSizeClosedChat
+                                        .width)
+                                .toInt(),
                           )
                         : Offstage(),
                   ),
-                  SizedBox(
-                    width: kConnectionManagerWindowSizeClosedChat.width -
-                        10, // 10 is from overflow
-                    child: pageView,
-                  )
+                  Expanded(
+                      child: pageView,
+                      flex: kConnectionManagerWindowSizeClosedChat.width
+                              .toInt() -
+                          4 // prevent stretch of the page view when chat is open,
+                      ),
                 ],
               ),
             ),
@@ -247,7 +254,7 @@ class ConnectionManagerState extends State<ConnectionManager> {
     } else {
       final opt = "enable-confirm-closing-tabs";
       final bool res;
-      if (!option2bool(opt, await bind.mainGetOption(key: opt))) {
+      if (!option2bool(opt, bind.mainGetLocalOption(key: opt))) {
         res = true;
       } else {
         res = await closeConfirmDialog();
@@ -444,7 +451,8 @@ class _CmHeaderState extends State<_CmHeader>
             child: IconButton(
               onPressed: () => checkClickTime(
                 client.id,
-                () => gFFI.chatModel.toggleCMChatPage(client.id),
+                () => gFFI.chatModel
+                    .toggleCMChatPage(MessageKey(client.peerId, client.id)),
               ),
               icon: SvgPicture.asset('assets/chat2.svg'),
               splashRadius: kDesktopIconButtonSplashRadius,
